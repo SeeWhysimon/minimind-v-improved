@@ -103,7 +103,7 @@ class VLMDataset(Dataset):
         input_ids += [self.tokenizer.pad_token_id] * (self.max_length - len(input_ids))
         labels = self.generate_labels(input_ids)
 
-        image_inputs_list = [MiniMindVLM.image2tensor(Image.open(io.BytesIO(img)), self.preprocess) for img in image_bytes]
+        image_inputs_list = [MiniMindVLM.image2tensor(Image.open(io.BytesIO(img)).convert("RGB"), self.preprocess) for img in image_bytes]
         if hasattr(image_inputs_list[0], 'keys'):
             image_data = {k: torch.cat([inp[k] for inp in image_inputs_list], dim=0) for k in image_inputs_list[0].keys()}
         else:
