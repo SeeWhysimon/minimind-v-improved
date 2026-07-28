@@ -3,28 +3,14 @@ import torch.nn as nn
 
 from typing import Optional
 
-class LayerNorm(nn.Module):
-    def __init__(self, features, eps=1e-6):
-        super().__init__()
-        self.a_2 = nn.Parameter(torch.ones(features))
-        self.b_2 = nn.Parameter(torch.zeros(features))
-        self.eps = eps
-        
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        mean = x.mean(-1, keepdim=True)
-        std = x.std(-1, keepdim=True)
-        
-        return self.a_2 * (x - mean) / (std + self.eps) + self.b_2
-        
 
-class CrossAttentionSampler(nn.Module):
+class CrossAttentionBlock(nn.Module):
     def __init__(
         self,
         embed_dim: int,
         num_heads: int,
         mlp_ratio: float = 4.0,
         dropout: float = 0.0,
-        batch_first: bool = True,
     ):
         super().__init__()
 
@@ -40,7 +26,7 @@ class CrossAttentionSampler(nn.Module):
             embed_dim=embed_dim,
             num_heads=num_heads,
             dropout=dropout,
-            batch_first=batch_first,
+            batch_first=True,
         )
 
         self.attention_dropout = nn.Dropout(dropout)
@@ -58,51 +44,97 @@ class CrossAttentionSampler(nn.Module):
 
     def forward(
         self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
+        query: torch.Tensor,
+        context: torch.Tensor,
         key_padding_mask: Optional[torch.Tensor] = None,
-        attn_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Args:
-            q:
-                batch_first=True 时形状为
-                [batch_size, query_length, embed_dim]
+            query:
+                形状为 [batch_size, query_length, embed_dim]
 
-            k, v:
-                batch_first=True 时形状为
-                [batch_size, context_length, embed_dim]
+            context:
+                形状为 [batch_size, context_length, embed_dim]
 
             key_padding_mask:
-                形状为 [batch_size, context_length]。
-                True 表示该位置不参与注意力计算。
-
-            attn_mask:
-                注意力掩码，通常形状为
-                [query_length, context_length]。
+                形状为 [batch_size, context_length]
+                True 表示该位置不参与注意力计算
 
         Returns:
             与 q 形状相同的张量。
         """
 
-        q_normed = self.q_norm(q)
-        k_normed = self.kv_norm(k)
-        v_normed = self.kv_norm(v)
+        q_normed = self.q_norm(query)
+        context_normed = self.kv_norm(context)
 
         attention_output, _ = self.cross_attention(
             query=q_normed,
-            key=k_normed,
-            value=v_normed,
+            key=context_normed,
+            value=context_normed,
             key_padding_mask=key_padding_mask,
-            attn_mask=attn_mask,
             need_weights=False,
         )
 
-        hidden = q + self.attention_dropout(attention_output)
-
-        output = hidden + self.ffn_dropout(
-            self.ffn(self.ffn_norm(hidden))
-        )
+        hidden = query + self.attention_dropout(attention_output)
+        output = hidden + self.ffn_dropout(self.ffn(self.ffn_norm(hidden)))
 
         return output
+    
+
+class VisionTokenResampler(nn.Module):
+    def init_weight(self, ):
+        pass
+    
+    def __init__(
+        self, 
+        input_dim: int, 
+        output_dim: int, 
+        num_queries: int = 64, 
+        num_heads: int = 8, 
+        depth: int = 1, 
+        mlp_ratio: float = 4.0, 
+        dropout: float = 0.2, 
+    ):
+        super().__init__()
+        
+        self.input_proj = nn.Linear(in_features=input_dim, out_features=output_dim) if input_dim != output_dim else nn.Identity()
+        self.attention_blocks = nn.ModuleList([
+            CrossAttentionBlock(output_dim, num_heads, mlp_ratio, dropout) for _ in range(depth)
+        ])
+        self.learned_queries = nn.Parameter(torch.randn(1, num_queries, output_dim) * 0.02)
+        self.output_norm = nn.LayerNorm(output_dim)
+        
+        self.init_weight()
+        
+    def forward(
+        self, 
+        vision_tokens: torch.Tensor, 
+        resampler_key_padding_mask: Optional[torch.Tensor] = None,
+    ):
+        """
+        Args:
+            vision_tokens:
+                形状为 [batch_size, context_length, input_dim]
+
+            vision_mask:
+                形状为 [batch_size, context_length]
+                True 表示有效视觉 token
+                False 表示 padding token
+
+        Returns:
+            qeury:
+                形状为 [batch_size, num_queries, output_dim]
+        """
+        if vision_tokens.ndim != 3:
+            raise ValueError("错误的 vision_token 维度")
+        
+        context = self.input_proj(vision_tokens)
+        
+        batch_size, context_len, _ = vision_tokens.shape
+        queries = self.learned_queries.expand(batch_size, -1, -1)
+        
+        for block in self.attention_blocks:
+            queries = block(queries, context, resampler_key_padding_mask)
+        
+        queries = self.output_norm(queries)
+        return queries  
